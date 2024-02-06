@@ -1,0 +1,338 @@
+#
+# nickmgr.irc - Nick management script for EPIC4-2.0
+# Copyright (c) 2004 Brian Weiss <brian@epicsol.org>
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. All redistributions, whether of source code or in binary form must
+#    retain the above copyright notice, the above paragraph (the one
+#    permitting redistribution), this list of conditions, and the following
+#    disclaimer.
+# 2. The names of the author(s) may not be used to endorse or promote 
+#    products derived from this software without specific prior written
+#    permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHORS `AS IS'' AND ANY EXPRESS OR 
+# IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES 
+# OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+# IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY DIRECT, INDIRECT, 
+# INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, 
+# BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED 
+# AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, 
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY 
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF 
+# SUCH DAMAGE.
+#
+# Version: 0.2.3
+# Last modified: 2005/03/16
+#
+# This script uses serial number 422 for all /ON hooks.
+#
+# This script was borrowed from my EPIC4 script pack named DarkStar.
+# It can be found here:
+#
+# http://darkstar.epicsol.org/
+#
+
+# Make sure this file gets loaded with the PF loader
+if (word(2 $loadinfo()) != [pf])
+{
+	load -pf $word(1 $loadinfo());
+	return;
+};
+
+assign NICKMGR 0;
+assign NICKMGR_AUTO_ADD_NICKS 1;
+assign NICKMGR_IGNORE_NETSPLITS 0;
+assign NICKMGR_IGNORE_TIMEOUT 900;
+assign NICKMGR_NICKLIST;
+assign NICKMGR_SCAN_INTERVAL 60;
+assign NICKMGR_SCAN_TIMEOUT 900;
+
+assign NICKMGR.NICKCHANGE_TIMEOUT 60;
+
+
+alias nick (...)
+{
+	if (NICKMGR && NICKMGR_AUTO_ADD_NICKS && findw($0 $NICKMGR_NICKLIST) == -1)
+	{
+		push NICKMGR_NICKLIST $0;
+	};
+	//nick $*;
+};
+
+#
+# nickmgr [[-a|-d] <nick> ...] ...
+#
+# Adds or removes nicks from NICKMGR_NICKLIST. The -a and -d options specify
+# which action to perform (add/delete). If neither option is provided then
+# -a will be assumed.
+#
+alias nickmgr (args)
+{
+	^local action add;
+	^local nicklist $NICKMGR_NICKLIST;
+
+	if (!args) {
+		assign NICKMGR_NICKLIST;
+		return;
+	};
+
+	while (:arg = shift(args))
+	{
+		switch ($arg)
+		{
+			(-a) {@ action = [add]};
+			(-d) {@ action = [delete]};
+			(*) {
+				if (action == [add]) {
+					@ push(nicklist $arg);
+				} else if (action == [delete]) {
+					@ nicklist = remw($arg $nicklist);
+				};
+			};
+		};
+	};
+
+	if (nicklist != NICKMGR_NICKLIST) {
+		assign NICKMGR_NICKLIST $nicklist;
+	} else {
+		assign NICKMGR_NICKLIST;
+	};
+};
+
+alias nickscan (...)
+{
+	nickmgr.scan $*;
+};
+
+
+alias nickmgr.add_timer (void)
+{
+	timer -ref nickmgr -rep -1 -win -1 $NICKMGR_SCAN_INTERVAL nickmgr.scan;
+};
+
+alias nickmgr.clean_ignore_list (void)
+{
+	for array in ($getarrays(nickmgr.ignore.*))
+	{
+		for ii from $numitems($array) to 1
+		{
+			@ :ts = word(1 $getitem($array ${ii-1}));
+			@ :diff = time() - ts;
+			if (diff > NICKMGR_IGNORE_TIMEOUT) {
+				@ delitem($array ${ii-1});
+			};
+		};
+	};
+};
+
+alias nickmgr.hook (nick, serv default "$servernum()", void)
+{
+	if (!nick)
+		return;
+
+	if (NICKMGR && nickmgr.wantnick($nick)) {
+		nickmgr.nickchange $nick;
+	};
+};
+
+#
+# Adds a nick to the nick manager's ignore list. This allows
+# signoffs that appear to be netsplits to be ignored, even by
+# the nickmgr.scan alias.
+#
+alias nickmgr.ignore (nick, serv default "$servernum()", void)
+{
+	if (!nick)
+		return;
+
+	nickmgr.clean_ignore_list;
+
+	if ((:item = matchitem(nickmgr.ignore.$serv $nick *)) > -1) {
+		@ setitem(nickmgr.ignore.$serv $item $nick $time());
+	} else {
+		@ setitem(nickmgr.ignore.$serv $numitems(nickmgr.ignore.$serv) $nick $time());
+	};
+};
+
+#
+# Server-specific version of Jeremy Nelson's $is_on() function.
+#
+alias nickmgr.is_on (nick, serv default "$servernum()", void)
+{
+	if (!nick)
+		return;
+
+	xeval -s $serv {
+		stack push on 303;
+		^on ^303 * {
+			stack pop on 303;
+			return $0;
+		};
+		wait for ison $nick;
+	};
+};
+
+alias nickmgr.nickchange (nick, serv default "$servernum()", void)
+{
+	if (!nick || serv < 0 || !isconnected($serv) || nick == servernick($serv))
+		return;
+
+	# Make sure we don't send more than one request at a time to a server.
+	if (NICKMGR.NICKCHANGE_PENDING[$encode($serv)])
+		return;
+
+	xecho -b NICKMGR: Changing nick on $servername($serv) to $nick;
+	@ NICKMGR.NICKCHANGE_PENDING.$encode($serv) = [$nick $time()];
+
+	^on #-raw_irc 422 "$servernick($serv)!% NICK *"
+	{
+		@ NICKMGR.NICKCHANGE_PENDING.$encode($servernum()) = [];
+		^on #-raw_irc 422 -"$servernick()!% NICK *";
+	};
+
+	xeval -s $serv {
+		nick $nick;
+	};
+};
+
+#
+# This will check each nick in $NICKMGR_NICKLIST, for each server
+# connection, until it either 1) finds one available, 2) reaches the end
+# of the list, or 3) reaches a nick less desirable than our current nick.
+#
+# In an attempt to ensure that servers don't get flooded with ISON requests
+# due to lag, a global variable in the NICKMGR.SCAN_PENDING structure will be
+# created containing a timestamp of when the scan began. While this variable
+# exists no scans will be allowed to take place for that server.
+#
+alias nickmgr.scan (void)
+{
+	@ :nlist = NICKMGR_NICKLIST;
+
+	if (!NICKMGR || !nlist)
+		return;
+
+	nickmgr.clean_ignore_list;
+
+	for serv in ($myservers(0))
+	{
+		if (serv > -1 && isconnected($serv))
+		{
+			if (!NICKMGR.SCAN_PENDING[$encode(serv)])
+			{
+				@ NICKMGR.SCAN_PENDING.$encode($serv) = time();
+				for ii from 1 to $numwords($nlist)
+				{
+					@ :nick = word(${ii-1} $nlist);
+					if (!nickmgr.wantnick($nick $serv))
+					{
+						break;
+					}
+					else if (matchitem(nickmgr.ignore.$serv $nick *) < 0)
+					{
+						if (!nickmgr.is_on($nick $serv))
+						{
+							nickmgr.nickchange $nick $serv;
+							break;
+						};
+					};
+				};
+				^assign -NICKMGR.SCAN_PENDING.$encode($serv);
+			};
+		};
+	};
+};
+
+#
+# Returns the specified nick if it is more desirable than our current
+# nick according to the value of $NICKMGR_NICKLIST.
+#
+alias nickmgr.wantnick (nick, serv default "$servernum()", void)
+{
+	if (!nick || nick == servernick($serv))
+		return;
+
+	@ :list = NICKMGR_NICKLIST;
+	@ :index = findw($nick $list);
+	@ :c_index = findw($servernick($serv) $list);
+
+	if (index > -1)
+	{
+		if (c_index == -1) {
+			@ function_return = nick;
+		} else if (index < c_index) {
+			@ function_return = nick;
+		};
+	};
+};
+
+
+#
+# Remove ignored nicks when they rejoin.
+#
+on #-join 422 "*"
+{
+	@ :serv = servernum();
+	@ :item = matchitem(nickmgr.ignore.$serv $0);
+
+	if (item > -1) {
+		@ delitem(nickmgr.ignore.$serv $item);
+	};
+};
+
+on #-raw_irc 422 "% NICK *"
+{
+	@ :nick = before(1 ! $0);
+	nickmgr.hook $nick;
+};
+
+on #-raw_irc 422 "% QUIT *"
+{
+	@ :nick = before(1 ! $0);
+	@ :reason = after(1 : $2-);
+
+	if (NICKMGR_IGNORE_NETSPLITS && match("%.%.% %.%.%" "$reason"))
+	{
+		nickmgr.clean_ignore_list;
+		nickmgr.ignore $nick;
+	}{
+		nickmgr.hook $nick;
+	};
+};
+
+on #-timer 422 "*"
+{
+	if (!timerctl(REFNUM nickmgr))
+		nickmgr.add_timer;
+
+	foreach NICKMGR.SCAN_PENDING xx
+	{
+		@ :diff = time() - NICKMGR.SCAN_PENDING[$xx];
+
+		if (diff > NICKMGR_SCAN_TIMEOUT) {
+			^assign -NICKMGR.SCAN_PENDING.$xx;
+		};
+	};
+
+	foreach NICKMGR.NICKCHANGE_PENDING xx
+	{
+		@ :diff = time() - NICKMGR.NICKCHANGE_PENDING[$xx];
+		@ :serv = decode($xx);
+
+		if (diff > NICKMGR.NICKCHANGE_TIMEOUT)
+		{
+			^on #-raw_irc 422 -"$servernick($serv)!% NICK *";
+			^assign -NICKMGR.NICKCHANGE_PENDING.$xx;
+		};
+	};
+};
+
+
+defer nickmgr.scan;
+defer nickmgr.add_timer;
+

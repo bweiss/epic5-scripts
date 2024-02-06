@@ -1,0 +1,24 @@
+window 1 level all name -
+
+set AUTO_WHOWAS OFF
+set BEEP OFF
+set BEEP_MAX 0
+set CLOCK_24HOUR ON
+set -CONTINUED_LINE
+set CURRENT_WINDOW_LEVEL NONE
+set DCC_SLIDING_WINDOW 5
+set DCC_STORE_PATH ~/downloads
+set HELP_PATH /usr/local/share/epic5/help
+set HELP_PROMPT ON
+set INDENT ON
+set LASTLOG 8192
+set LOAD_PATH ~/.epic5:/usr/local/share/epic5/script:/usr/local/share/epic5:.
+set MAIL 0
+set MANGLE_LOGFILES ALL
+set NEW_SERVER_LASTLOG_LEVEL NONE
+set NO_FAIL_DISCONNECT ON
+set SCROLLBACK 8192
+set SWITCH_CHANNELS_BETWEEN_WINDOWS OFF
+set WORD_BREAK ,;
+
+load -pf ~/darkstar/darkstar.irc
